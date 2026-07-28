@@ -1,21 +1,46 @@
 {
   "name": "adb-plugin-server-logs",
   "displayName": "Server Logs",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Comprehensive server logging plugin for tracking member changes, message edits/deletes, moderation actions, voice events, channel changes, and server boosts.",
   "author": "DeadIndian",
   "main": "index.js",
   "requiresRestart": false,
-  "permissions": [
-    "db.read",
-    "db.write",
-    "commands.register"
-  ],
-  "discordPermissions": [
-    "SendMessages",
-    "EmbedLinks",
-    "ViewAuditLog"
-  ],
+  "manifestVersion": 2,
+  "process": {
+    "model": "persistent",
+    "maxExecutionMs": 15000,
+    "memoryMb": 256,
+    "persistentReason": "Runs un-isolated (system:raw-client) to fetch audit logs (fetchAuditLogs), read message content and member caches, and inspect voice/channel state on every event — discord.js audit-log and cache APIs are outside the sandboxed RPC surface."
+  },
+  "capabilities": {
+    "system": ["raw-client"],
+    "storage": ["own-collection"],
+    "discord": ["SendMessages", "EmbedLinks", "ViewAuditLog", "ManageMessages"],
+    "hooks": ["subscribe"]
+  },
+  "permissions": {
+    "system": ["raw-client"],
+    "storage": ["own-collection"],
+    "discord": ["SendMessages", "EmbedLinks", "ViewAuditLog", "ManageMessages"],
+    "hooks": ["subscribe"],
+    "network": { "outbound": [] },
+    "filesystem": { "read": [], "write": [] },
+    "childProcess": false,
+    "nativeAddons": false
+  },
+  "declaredDependencies": [{ "package": "node-cron", "version": "^3.0.3" }],
+  "discordPermissions": ["SendMessages", "EmbedLinks", "ViewAuditLog"],
+  "engines": {
+    "core": ">=2.0.0",
+    "plugins": { "administration": ">=2.0.0" }
+  },
+  "settings": {
+    "commandPermissions": true,
+    "schema": [
+      { "key": "enabled", "type": "boolean", "label": "Enable server logs", "default": true }
+    ]
+  },
   "configSchema": {
     "type": "object",
     "properties": {
