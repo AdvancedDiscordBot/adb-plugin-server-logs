@@ -1,6 +1,6 @@
 {
   "name": "adb-plugin-server-logs",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Comprehensive server logging for ADB — member, message, moderation, voice, and channel events.",
   "main": "index.js",
   "files": [

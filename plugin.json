@@ -1,7 +1,7 @@
 {
   "name": "adb-plugin-server-logs",
   "displayName": "Server Logs",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Comprehensive server logging plugin for tracking member changes, message edits/deletes, moderation actions, voice events, channel changes, and server boosts.",
   "author": "DeadIndian",
   "main": "index.js",
@@ -38,7 +38,21 @@
   "settings": {
     "commandPermissions": true,
     "schema": [
-      { "key": "enabled", "type": "boolean", "label": "Enable server logs", "default": true }
+      { "key": "enabled", "type": "boolean", "label": "Enable server logs", "default": true },
+      { "key": "membersChannelId", "type": "channel", "label": "Member events log channel" },
+      { "key": "messagesChannelId", "type": "channel", "label": "Message events log channel" },
+      { "key": "moderationChannelId", "type": "channel", "label": "Moderation log channel" },
+      { "key": "voiceChannelId", "type": "channel", "label": "Voice events log channel" },
+      { "key": "channelsChannelId", "type": "channel", "label": "Channel events log channel" },
+      { "key": "boostsChannelId", "type": "channel", "label": "Boost events log channel" },
+      { "key": "retentionDays", "type": "number", "label": "Message cache retention (days)" }
+    ]
+  },
+  "dashboard": {
+    "permissions": [
+      { "key": "view", "label": "View", "description": "See logging configuration." },
+      { "key": "configure", "label": "Configure", "description": "Set log channels, categories, and retention." },
+      { "key": "view-logs", "label": "View logs", "description": "Read the stored/cached message log history." }
     ]
   },
   "configSchema": {
@@ -48,7 +62,14 @@
         "type": "boolean",
         "default": true,
         "description": "Enable this plugin for the server"
-      }
+      },
+      "membersChannelId": { "type": "string", "default": null, "description": "Channel ID for member join/leave/update logs" },
+      "messagesChannelId": { "type": "string", "default": null, "description": "Channel ID for message edit/delete logs" },
+      "moderationChannelId": { "type": "string", "default": null, "description": "Channel ID for moderation/role logs" },
+      "voiceChannelId": { "type": "string", "default": null, "description": "Channel ID for voice state logs" },
+      "channelsChannelId": { "type": "string", "default": null, "description": "Channel ID for channel create/update/delete logs" },
+      "boostsChannelId": { "type": "string", "default": null, "description": "Channel ID for server boost logs" },
+      "retentionDays": { "type": "number", "default": 30, "minimum": 1, "maximum": 365, "description": "Days to keep cached messages for edit/delete logging" }
     }
   }
 }

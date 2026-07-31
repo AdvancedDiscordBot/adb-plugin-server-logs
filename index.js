@@ -7,10 +7,60 @@ const { createLogCommand } = require("./commands/log");
 const logConfigSchema = require("./models/logConfig");
 const messageCacheSchema = require("./models/messageCache");
 
+const PLUGIN_NAME = "adb-plugin-server-logs";
+
+/**
+ * Resolve the effective logging config for a guild by overlaying the dashboard
+ * store on top of the plugin's own LogConfig model.
+ *
+ * The `/log` command writes LogConfig (the base); the dashboard writes the
+ * plugin config store. Dashboard values take precedence *where set* so admins
+ * can steer logging from the web UI without orphaning existing `/log` setups.
+ * Anything the dashboard leaves unset falls through to LogConfig.
+ *
+ * @returns {Promise<{enabled: boolean, categories: object, retentionDays: number, ignoredChannels: string[]}>}
+ */
+async function resolveConfig(ctx, LogConfigModel, guildId) {
+  const base = (await LogConfigModel.findOne({ guildId })) || {};
+  let dash = {};
+  try {
+    dash = (await ctx.db.getPluginConfig(guildId, PLUGIN_NAME))?.data || {};
+  } catch (err) {
+    ctx.logger.error("Failed to read server-logs dashboard config:", err);
+  }
+
+  const baseCategories = base.categories
+    ? typeof base.categories.toObject === "function"
+      ? base.categories.toObject()
+      : { ...base.categories }
+    : {};
+
+  // The dashboard settings form stores flat keys (e.g. membersChannelId). Map
+  // each set one onto its category, overlaying the base LogConfig categories.
+  const CATEGORY_KEYS = ["members", "messages", "moderation", "voice", "channels", "boosts"];
+  const dashCategories = {};
+  for (const cat of CATEGORY_KEYS) {
+    const v = dash[`${cat}ChannelId`];
+    if (typeof v === "string" && v) dashCategories[cat] = v;
+  }
+
+  return {
+    enabled: typeof dash.enabled === "boolean" ? dash.enabled : base.enabled === true,
+    categories: { ...baseCategories, ...dashCategories },
+    retentionDays:
+      typeof dash.retentionDays === "number" ? dash.retentionDays : base.retentionDays,
+    ignoredChannels: Array.isArray(dash.ignoredChannels)
+      ? dash.ignoredChannels
+      : Array.isArray(base.ignoredChannels)
+        ? base.ignoredChannels
+        : [],
+  };
+}
+
 async function sendLog(ctx, LogConfigModel, guildId, category, embed) {
   try {
-    const config = await LogConfigModel.findOne({ guildId });
-    if (!config || !config.enabled) return;
+    const config = await resolveConfig(ctx, LogConfigModel, guildId);
+    if (!config.enabled) return;
 
     const channelId = config.categories && config.categories[category];
     if (!channelId) return;
@@ -28,7 +78,10 @@ async function pruneMessageCaches(ctx, LogConfigModel, MessageCacheModel) {
   try {
     const configs = await LogConfigModel.find({});
     for (const config of configs) {
-      const cutoff = new Date(Date.now() - config.retentionDays * 24 * 60 * 60 * 1000);
+      const resolved = await resolveConfig(ctx, LogConfigModel, config.guildId);
+      const retentionDays = resolved.retentionDays;
+      if (!retentionDays || retentionDays <= 0) continue;
+      const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
       const result = await MessageCacheModel.deleteMany({
         guildId: config.guildId,
         createdAt: { $lt: cutoff },
@@ -468,8 +521,8 @@ async function load(ctx) {
   ctx.registerEvent("messageCreate", async (message) => {
     if (!message.guild || message.author.bot) return;
 
-    const config = await LogConfigModel.findOne({ guildId: message.guild.id });
-    if (!config || !config.enabled || !config.categories || !config.categories.messages) return;
+    const config = await resolveConfig(ctx, LogConfigModel, message.guild.id);
+    if (!config.enabled || !config.categories.messages) return;
 
     if (config.ignoredChannels && config.ignoredChannels.includes(message.channel.id)) return;
 
@@ -491,8 +544,8 @@ async function load(ctx) {
   ctx.registerEvent("messageDelete", async (message) => {
     if (!message.guild) return;
 
-    const config = await LogConfigModel.findOne({ guildId: message.guild.id });
-    if (!config || !config.enabled || !config.categories || !config.categories.messages) return;
+    const config = await resolveConfig(ctx, LogConfigModel, message.guild.id);
+    if (!config.enabled || !config.categories.messages) return;
 
     if (config.ignoredChannels && config.ignoredChannels.includes(message.channel.id)) return;
 
@@ -528,8 +581,8 @@ async function load(ctx) {
   ctx.registerEvent("messageUpdate", async (oldMessage, newMessage) => {
     if (!newMessage.guild || newMessage.author?.bot) return;
 
-    const config = await LogConfigModel.findOne({ guildId: newMessage.guild.id });
-    if (!config || !config.enabled || !config.categories || !config.categories.messages) return;
+    const config = await resolveConfig(ctx, LogConfigModel, newMessage.guild.id);
+    if (!config.enabled || !config.categories.messages) return;
 
     if (config.ignoredChannels && config.ignoredChannels.includes(newMessage.channel.id)) return;
 
@@ -582,8 +635,8 @@ async function load(ctx) {
     const firstMsg = messages.first();
     if (!firstMsg || !firstMsg.guild) return;
 
-    const config = await LogConfigModel.findOne({ guildId: firstMsg.guild.id });
-    if (!config || !config.enabled || !config.categories || !config.categories.messages) return;
+    const config = await resolveConfig(ctx, LogConfigModel, firstMsg.guild.id);
+    if (!config.enabled || !config.categories.messages) return;
 
     if (config.ignoredChannels && config.ignoredChannels.includes(firstMsg.channel.id)) return;
 
