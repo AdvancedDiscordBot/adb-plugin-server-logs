@@ -5,6 +5,7 @@ const { EmbedBuilder, AuditLogEvent } = require("discord.js");
 
 const { createLogCommand } = require("./commands/log");
 const logConfigSchema = require("./models/logConfig");
+const memberEventSchema = require("./models/memberEvent");
 const messageCacheSchema = require("./models/messageCache");
 
 const PLUGIN_NAME = "adb-plugin-server-logs";
@@ -57,10 +58,24 @@ async function resolveConfig(ctx, LogConfigModel, guildId) {
   };
 }
 
-async function sendLog(ctx, LogConfigModel, guildId, category, embed) {
+async function sendLog(ctx, LogConfigModel, guildId, category, embed, targetUserId, MemberEventModel) {
   try {
     const config = await resolveConfig(ctx, LogConfigModel, guildId);
     if (!config.enabled) return;
+
+    // Record a per-user event for the platform member page (/me/activity).
+    // Done before the channel check so members can still see their own
+    // activity even when no log channel is configured for the category.
+    // The embed title is the short, human-readable text; descriptions contain
+    // Discord markdown/mentions that would not render on the web.
+    if (targetUserId && MemberEventModel) {
+      await MemberEventModel.create({
+        guildId,
+        userId: targetUserId,
+        category,
+        description: String(embed.data?.title ?? embed.data?.description ?? ""),
+      }).catch(() => {});
+    }
 
     const channelId = config.categories && config.categories[category];
     if (!channelId) return;
@@ -97,6 +112,7 @@ async function pruneMessageCaches(ctx, LogConfigModel, MessageCacheModel) {
 
 async function load(ctx) {
   const LogConfigModel = ctx.defineModel("LogConfig", logConfigSchema);
+  const MemberEventModel = ctx.defineModel("memberEvent", memberEventSchema);
   const MessageCacheModel = ctx.defineModel("MessageCache", messageCacheSchema);
 
   // Register command
@@ -128,7 +144,7 @@ async function load(ctx) {
       )
       .setTimestamp();
 
-    await sendLog(ctx, LogConfigModel, member.guild.id, "members", embed);
+    await sendLog(ctx, LogConfigModel, member.guild.id, "members", embed, member.id, MemberEventModel);
   });
 
   // 2. Member Leaves & Kicks
@@ -166,7 +182,7 @@ async function load(ctx) {
         )
         .setTimestamp();
 
-      await sendLog(ctx, LogConfigModel, member.guild.id, "moderation", embed);
+      await sendLog(ctx, LogConfigModel, member.guild.id, "moderation", embed, member.id, MemberEventModel);
     } else {
       const rolesJoined = member.roles.cache
         .filter((r) => r.id !== member.guild.id)
@@ -185,7 +201,7 @@ async function load(ctx) {
         )
         .setTimestamp();
 
-      await sendLog(ctx, LogConfigModel, member.guild.id, "members", embed);
+      await sendLog(ctx, LogConfigModel, member.guild.id, "members", embed, member.id, MemberEventModel);
     }
   });
 
@@ -210,7 +226,7 @@ async function load(ctx) {
       )
       .setTimestamp();
 
-    await sendLog(ctx, LogConfigModel, ban.guild.id, "moderation", embed);
+    await sendLog(ctx, LogConfigModel, ban.guild.id, "moderation", embed, ban.user.id, MemberEventModel);
   });
 
   // 4. Moderation: Unbans
@@ -234,7 +250,7 @@ async function load(ctx) {
       )
       .setTimestamp();
 
-    await sendLog(ctx, LogConfigModel, ban.guild.id, "moderation", embed);
+    await sendLog(ctx, LogConfigModel, ban.guild.id, "moderation", embed, ban.user.id, MemberEventModel);
   });
 
   // 5. Moderation (Timeouts), Server Boosts & Role Updates (guildMemberUpdate)
@@ -265,7 +281,7 @@ async function load(ctx) {
           )
           .setTimestamp();
 
-        await sendLog(ctx, LogConfigModel, newMember.guild.id, "moderation", embed);
+        await sendLog(ctx, LogConfigModel, newMember.guild.id, "moderation", embed, newMember.id, MemberEventModel);
       } else if (!newTimeout && oldTimeout) {
         const auditLogs = await newMember.guild.fetchAuditLogs({
           limit: 1,
@@ -286,7 +302,7 @@ async function load(ctx) {
           )
           .setTimestamp();
 
-        await sendLog(ctx, LogConfigModel, newMember.guild.id, "moderation", embed);
+        await sendLog(ctx, LogConfigModel, newMember.guild.id, "moderation", embed, newMember.id, MemberEventModel);
       }
     }
 
@@ -303,7 +319,7 @@ async function load(ctx) {
           .setDescription(`**${newMember.user.tag}** (${newMember}) just boosted the server! 🚀`)
           .setTimestamp();
 
-        await sendLog(ctx, LogConfigModel, newMember.guild.id, "boosts", embed);
+        await sendLog(ctx, LogConfigModel, newMember.guild.id, "boosts", embed, newMember.id, MemberEventModel);
       } else if (oldBoost && !newBoost) {
         const embed = new EmbedBuilder()
           .setTitle("📉 Server Boost Removed")
@@ -312,7 +328,7 @@ async function load(ctx) {
           .setDescription(`**${newMember.user.tag}** is no longer boosting the server.`)
           .setTimestamp();
 
-        await sendLog(ctx, LogConfigModel, newMember.guild.id, "boosts", embed);
+        await sendLog(ctx, LogConfigModel, newMember.guild.id, "boosts", embed, newMember.id, MemberEventModel);
       }
     }
 
@@ -348,7 +364,7 @@ async function load(ctx) {
           });
         }
 
-        await sendLog(ctx, LogConfigModel, newMember.guild.id, "members", embed);
+        await sendLog(ctx, LogConfigModel, newMember.guild.id, "members", embed, newMember.id, MemberEventModel);
       }
     }
   });

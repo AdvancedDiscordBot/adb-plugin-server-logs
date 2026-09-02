@@ -1,7 +1,7 @@
 {
   "name": "adb-plugin-server-logs",
   "displayName": "Server Logs",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Comprehensive server logging plugin for tracking member changes, message edits/deletes, moderation actions, voice events, channel changes, and server boosts.",
   "author": "DeadIndian",
   "main": "index.js",
@@ -53,6 +53,25 @@
       { "key": "view", "label": "View", "description": "See logging configuration." },
       { "key": "configure", "label": "Configure", "description": "Set log channels, categories, and retention." },
       { "key": "view-logs", "label": "View logs", "description": "Read the stored/cached message log history." }
+    ]
+  },
+  "webUi": {
+    "memberPages": [
+      {
+        "path": "/me/activity",
+        "label": "My Activity Log",
+        "icon": "ScrollText",
+        "source": { "model": "memberEvent", "scope": "member", "sort": { "createdAt": -1 }, "limit": 100 },
+        "view": {
+          "type": "table",
+          "columns": [
+            { "field": "category", "label": "Type" },
+            { "field": "description", "label": "Event" },
+            { "field": "createdAt", "label": "When" }
+          ],
+          "empty": "No logged activity about you in this server."
+        }
+      }
     ]
   },
   "configSchema": {

@@ -167,6 +167,7 @@ async function main() {
   console.log("Testing Event: guildMemberAdd...");
   loggedEmbeds.length = 0;
   const mockMember = {
+    id: "member-1",
     guild: { id: "test-guild", memberCount: 42 },
     user: { id: "member-1", tag: "newbie#0001", createdTimestamp: Date.now() - 100000, displayAvatarURL: () => "https://example.com/avatar.png" },
   };
@@ -174,6 +175,14 @@ async function main() {
   assert.strictEqual(loggedEmbeds.length, 1);
   assert.strictEqual(loggedEmbeds[0].channelId, "members-log");
   assert.strictEqual(loggedEmbeds[0].payload.embeds[0].data.title, "📥 Member Joined");
+
+  // guildMemberAdd records a memberEvent doc for the member (member page /me/activity)
+  const MemberEvent = models.get("plugin_adb-plugin-server-logs_memberEvent");
+  assert.ok(MemberEvent, "memberEvent model should be registered");
+  let memberEvents = await MemberEvent.find({ guildId: "test-guild", userId: "member-1" });
+  assert.strictEqual(memberEvents.length, 1, "guildMemberAdd should record one memberEvent");
+  assert.strictEqual(memberEvents[0].category, "members");
+  assert.ok(typeof memberEvents[0].description === "string" && memberEvents[0].description.length > 0, "memberEvent description should be set");
 
   console.log("Testing Event: guildMemberRemove (Leave)...");
   loggedEmbeds.length = 0;
@@ -192,6 +201,11 @@ async function main() {
   assert.strictEqual(loggedEmbeds.length, 1);
   assert.strictEqual(loggedEmbeds[0].channelId, "members-log");
   assert.strictEqual(loggedEmbeds[0].payload.embeds[0].data.title, "📤 Member Left");
+
+  // guildMemberRemove records a second memberEvent for the same member
+  memberEvents = await MemberEvent.find({ guildId: "test-guild", userId: "member-1" });
+  assert.strictEqual(memberEvents.length, 2, "guildMemberRemove should record another memberEvent");
+  assert.strictEqual(memberEvents[1].category, "members");
 
   console.log("Testing Event: Message Edit and Delete (Message Cache)...");
   loggedEmbeds.length = 0;
@@ -234,11 +248,19 @@ async function main() {
   cachedMsg = await MessageCache.findOne({ messageId: "msg-123" });
   assert.strictEqual(cachedMsg, null, "Message cache should be cleared on delete");
 
+  // Message events pass no target user, so they must not create memberEvent docs
+  assert.strictEqual(
+    await MemberEvent.countDocuments({}),
+    2,
+    "sendLog without a target user creates no memberEvent docs"
+  );
+
   console.log("OK: all server-logs checks passed");
 }
 
-main().catch((error) => {
-  console.error("Local harness failed:", error);
-  process.exit(1);
-});
-process.exit(0);
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error("Local harness failed:", error);
+    process.exit(1);
+  });
