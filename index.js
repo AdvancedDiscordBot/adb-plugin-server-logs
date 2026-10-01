@@ -10,6 +10,17 @@ const messageCacheSchema = require("./models/messageCache");
 
 const PLUGIN_NAME = "adb-plugin-server-logs";
 
+function truncate(value, limit = 1024) {
+	return value.length > limit ? value.slice(0, limit - 3) + "..." : value;
+}
+
+function matchingAuditEntry(logs, targetId, changedKey) {
+	const entry = logs?.entries.first();
+	const age = entry ? Date.now() - entry.createdTimestamp : Infinity;
+	return entry?.targetId === targetId && age >= 0 && age < 10000 &&
+		(!changedKey || entry.changes?.some((change) => change.key === changedKey)) ? entry : null;
+}
+
 /**
  * Resolve the effective logging config for a guild by overlaying the dashboard
  * store on top of the plugin's own LogConfig model.
@@ -49,7 +60,7 @@ async function resolveConfig(ctx, LogConfigModel, guildId) {
     enabled: typeof dash.enabled === "boolean" ? dash.enabled : base.enabled === true,
     categories: { ...baseCategories, ...dashCategories },
     retentionDays:
-      typeof dash.retentionDays === "number" ? dash.retentionDays : base.retentionDays,
+      typeof dash.retentionDays === "number" ? dash.retentionDays : (base.retentionDays ?? 30),
     ignoredChannels: Array.isArray(dash.ignoredChannels)
       ? dash.ignoredChannels
       : Array.isArray(base.ignoredChannels)
@@ -81,7 +92,7 @@ async function sendLog(ctx, LogConfigModel, guildId, category, embed, targetUser
     if (!channelId) return;
 
     const channel = await ctx.client.channels.fetch(channelId).catch(() => null);
-    if (!channel || !channel.isTextBased()) return;
+    if (!channel || channel.guildId !== guildId || !channel.isTextBased()) return;
 
     await channel.send({ embeds: [embed] }).catch(() => {});
   } catch (err) {
@@ -91,18 +102,19 @@ async function sendLog(ctx, LogConfigModel, guildId, category, embed, targetUser
 
 async function pruneMessageCaches(ctx, LogConfigModel, MessageCacheModel) {
   try {
-    const configs = await LogConfigModel.find({});
-    for (const config of configs) {
-      const resolved = await resolveConfig(ctx, LogConfigModel, config.guildId);
+		// Dashboard-only setups (and departed guilds) may have no LogConfig row.
+		const guildIds = await MessageCacheModel.distinct("guildId");
+    for (const guildId of guildIds) {
+      const resolved = await resolveConfig(ctx, LogConfigModel, guildId);
       const retentionDays = resolved.retentionDays;
-      if (!retentionDays || retentionDays <= 0) continue;
+      if (!Number.isFinite(retentionDays) || retentionDays <= 0) continue;
       const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
       const result = await MessageCacheModel.deleteMany({
-        guildId: config.guildId,
+        guildId,
         createdAt: { $lt: cutoff },
       });
       if (result.deletedCount > 0) {
-        ctx.logger.info(`Pruned ${result.deletedCount} cached messages for guild ${config.guildId}`);
+        ctx.logger.info(`Pruned ${result.deletedCount} cached messages for guild ${guildId}`);
       }
     }
   } catch (err) {
@@ -149,6 +161,7 @@ async function load(ctx) {
 
   // 2. Member Leaves & Kicks
   ctx.registerEvent("guildMemberRemove", async (member) => {
+		const userTag = member.user?.tag || member.id;
     // Check if member was banned. If so, let guildBanAdd handle it.
     const banLogs = await member.guild.fetchAuditLogs({
       limit: 1,
@@ -174,26 +187,26 @@ async function load(ctx) {
       const embed = new EmbedBuilder()
         .setTitle("👢 Member Kicked")
         .setColor(0xe67e22)
-        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
-        .setDescription(`**${member.user.tag}** was kicked from the server.`)
+        .setThumbnail(member.user?.displayAvatarURL?.({ dynamic: true }) || null)
+        .setDescription(`**${userTag}** was kicked from the server.`)
         .addFields(
           { name: "Kicked By", value: executor ? `${executor.tag} (${executor})` : "Unknown", inline: true },
-          { name: "Reason", value: reason }
+          { name: "Reason", value: truncate(reason) }
         )
         .setTimestamp();
 
       await sendLog(ctx, LogConfigModel, member.guild.id, "moderation", embed, member.id, MemberEventModel);
     } else {
-      const rolesJoined = member.roles.cache
-        .filter((r) => r.id !== member.guild.id)
+      const rolesJoined = member.roles?.cache
+        ?.filter((r) => r.id !== member.guild.id)
         .map((r) => r.toString())
         .join(", ") || "*None*";
 
       const embed = new EmbedBuilder()
         .setTitle("📤 Member Left")
         .setColor(0xe74c3c)
-        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
-        .setDescription(`**${member.user.tag}** (${member.user}) has left the server.`)
+        .setThumbnail(member.user?.displayAvatarURL?.({ dynamic: true }) || null)
+        .setDescription(`**${userTag}** (<@${member.id}>) has left the server.`)
         .addFields(
           { name: "Joined At", value: member.joinedTimestamp ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : "Unknown", inline: true },
           { name: "Member Count", value: `${member.guild.memberCount}`, inline: true },
@@ -212,7 +225,7 @@ async function load(ctx) {
       type: AuditLogEvent.MemberBanAdd,
     }).catch(() => null);
 
-    const banLog = auditLogs?.entries.first();
+    const banLog = matchingAuditEntry(auditLogs, ban.user.id);
     const executor = banLog ? banLog.executor : null;
     const reason = ban.reason || banLog?.reason || "No reason provided";
 
@@ -222,7 +235,7 @@ async function load(ctx) {
       .setDescription(`**${ban.user.tag}** (${ban.user.id}) was banned from the server.`)
       .addFields(
         { name: "Banned By", value: executor ? `${executor.tag} (${executor})` : "Unknown", inline: true },
-        { name: "Reason", value: reason }
+        { name: "Reason", value: truncate(reason) }
       )
       .setTimestamp();
 
@@ -236,7 +249,7 @@ async function load(ctx) {
       type: AuditLogEvent.MemberBanRemove,
     }).catch(() => null);
 
-    const unbanLog = auditLogs?.entries.first();
+    const unbanLog = matchingAuditEntry(auditLogs, ban.user.id);
     const executor = unbanLog ? unbanLog.executor : null;
     const reason = unbanLog?.reason || "No reason provided";
 
@@ -246,7 +259,7 @@ async function load(ctx) {
       .setDescription(`**${ban.user.tag}** (${ban.user.id}) was unbanned.`)
       .addFields(
         { name: "Unbanned By", value: executor ? `${executor.tag} (${executor})` : "Unknown", inline: true },
-        { name: "Reason", value: reason }
+        { name: "Reason", value: truncate(reason) }
       )
       .setTimestamp();
 
@@ -255,18 +268,20 @@ async function load(ctx) {
 
   // 5. Moderation (Timeouts), Server Boosts & Role Updates (guildMemberUpdate)
   ctx.registerEvent("guildMemberUpdate", async (oldMember, newMember) => {
+		// Fetching a partial old member cannot recover its previous state.
+		if (oldMember.partial || newMember.partial) return;
     // Timeout detection
     const oldTimeout = oldMember.communicationDisabledUntilTimestamp;
     const newTimeout = newMember.communicationDisabledUntilTimestamp;
 
-    if (oldTimeout !== newTimeout) {
+    if (oldTimeout !== undefined && newTimeout !== undefined && oldTimeout !== newTimeout) {
       if (newTimeout && newTimeout > Date.now()) {
         const auditLogs = await newMember.guild.fetchAuditLogs({
           limit: 1,
           type: AuditLogEvent.MemberUpdate,
         }).catch(() => null);
 
-        const timeoutLog = auditLogs?.entries.first();
+        const timeoutLog = matchingAuditEntry(auditLogs, newMember.id, "communication_disabled_until");
         const executor = timeoutLog ? timeoutLog.executor : null;
         const reason = timeoutLog?.reason || "No reason provided";
 
@@ -277,7 +292,7 @@ async function load(ctx) {
           .addFields(
             { name: "Until", value: `<t:${Math.floor(newTimeout / 1000)}:F> (<t:${Math.floor(newTimeout / 1000)}:R>)`, inline: true },
             { name: "Timed Out By", value: executor ? `${executor.tag} (${executor})` : "Unknown", inline: true },
-            { name: "Reason", value: reason }
+            { name: "Reason", value: truncate(reason) }
           )
           .setTimestamp();
 
@@ -288,7 +303,7 @@ async function load(ctx) {
           type: AuditLogEvent.MemberUpdate,
         }).catch(() => null);
 
-        const untimeoutLog = auditLogs?.entries.first();
+        const untimeoutLog = matchingAuditEntry(auditLogs, newMember.id, "communication_disabled_until");
         const executor = untimeoutLog ? untimeoutLog.executor : null;
         const reason = untimeoutLog?.reason || "No reason provided";
 
@@ -298,7 +313,7 @@ async function load(ctx) {
           .setDescription(`**${newMember.user.tag}**'s timeout was removed.`)
           .addFields(
             { name: "Removed By", value: executor ? `${executor.tag} (${executor})` : "Unknown", inline: true },
-            { name: "Reason", value: reason }
+            { name: "Reason", value: truncate(reason) }
           )
           .setTimestamp();
 
@@ -310,7 +325,7 @@ async function load(ctx) {
     const oldBoost = oldMember.premiumSinceTimestamp;
     const newBoost = newMember.premiumSinceTimestamp;
 
-    if (oldBoost !== newBoost) {
+    if (oldBoost !== undefined && newBoost !== undefined && oldBoost !== newBoost) {
       if (!oldBoost && newBoost) {
         const embed = new EmbedBuilder()
           .setTitle("✨ Server Boosted!")
@@ -336,7 +351,7 @@ async function load(ctx) {
     const oldRoles = oldMember.roles?.cache;
     const newRoles = newMember.roles?.cache;
 
-    if (oldRoles && newRoles && oldRoles.size !== newRoles.size) {
+    if (oldRoles && newRoles) {
       const addedRoles = newRoles.filter((r) => !oldRoles.has(r.id));
       const removedRoles = oldRoles.filter((r) => !newRoles.has(r.id));
 
@@ -411,7 +426,7 @@ async function load(ctx) {
         const embed = new EmbedBuilder()
           .setTitle("🔊 Voice Channel Join")
           .setColor(0x2ecc71)
-          .setDescription(`**${member.user.tag}** (${member}) joined voice channel **${channel.name}** (<#${channel.id}>).`)
+          .setDescription(`**${member.user.tag}** (${member}) joined voice channel **${channel?.name || "Unknown"}** (<#${newChannelId}>).`)
           .setTimestamp();
 
         await sendLog(ctx, LogConfigModel, guildId, "voice", embed);
@@ -511,7 +526,7 @@ async function load(ctx) {
       changes.push(`• **Name**: \`${oldChannel.name}\` ➔ \`${newChannel.name}\``);
     }
     if (oldChannel.topic !== newChannel.topic) {
-      changes.push(`• **Topic**: \n*Old:* ${oldChannel.topic || "*None*"}\n*New:* ${newChannel.topic || "*None*"}`);
+      changes.push(`• **Topic**: \n*Old:* ${truncate(oldChannel.topic || "*None*")}\n*New:* ${truncate(newChannel.topic || "*None*")}`);
     }
     if (oldChannel.nsfw !== newChannel.nsfw) {
       changes.push(`• **NSFW**: \`${oldChannel.nsfw}\` ➔ \`${newChannel.nsfw}\``);
@@ -527,7 +542,7 @@ async function load(ctx) {
     const embed = new EmbedBuilder()
       .setTitle("✏️ Channel Updated")
       .setColor(0x3498db)
-      .setDescription(`Channel **${newChannel.name}** (<#${newChannel.id}>) was updated.\n\n${changes.join("\n")}`)
+      .setDescription(truncate(`Channel **${newChannel.name}** (<#${newChannel.id}>) was updated.\n\n${changes.join("\n")}`, 4096))
       .setTimestamp();
 
     await sendLog(ctx, LogConfigModel, newChannel.guild.id, "channels", embed);
@@ -535,7 +550,7 @@ async function load(ctx) {
 
   // 11. Message caching (messageCreate)
   ctx.registerEvent("messageCreate", async (message) => {
-    if (!message.guild || message.author.bot) return;
+    if (!message.guild || !message.author || message.author.bot) return;
 
     const config = await resolveConfig(ctx, LogConfigModel, message.guild.id);
     if (!config.enabled || !config.categories.messages) return;
@@ -583,7 +598,7 @@ async function load(ctx) {
       .setTimestamp();
 
     if (attachments && attachments.length > 0) {
-      embed.addFields({ name: "Attachments", value: attachments.join("\n") });
+      embed.addFields({ name: "Attachments", value: truncate(attachments.join("\n")) });
     }
 
     await sendLog(ctx, LogConfigModel, message.guild.id, "messages", embed);
@@ -602,14 +617,28 @@ async function load(ctx) {
 
     if (config.ignoredChannels && config.ignoredChannels.includes(newMessage.channel.id)) return;
 
-    if (oldMessage.content === newMessage.content) return;
+		if (newMessage.partial) {
+			try {
+				newMessage = await newMessage.fetch();
+			} catch {
+				return;
+			}
+		}
+		if (typeof newMessage.content !== "string" || newMessage.author?.bot) return;
 
     let cached = await MessageCacheModel.findOne({ messageId: newMessage.id, guildId: newMessage.guild.id });
-    const oldContent = (oldMessage.content !== null && oldMessage.content !== undefined)
+    const oldContent = (!oldMessage.partial && typeof oldMessage.content === "string")
       ? oldMessage.content
       : (cached ? cached.content : null);
 
-    if (oldContent === newMessage.content) return;
+		const attachments = newMessage.attachments
+			? Array.from(newMessage.attachments.values(), (a) => a.url)
+			: (cached?.attachments || []);
+		const oldAttachments = !oldMessage.partial && oldMessage.attachments
+			? Array.from(oldMessage.attachments.values(), (a) => a.url)
+			: (cached?.attachments || []);
+		const attachmentsChanged = JSON.stringify(oldAttachments) !== JSON.stringify(attachments);
+		if (oldContent === newMessage.content && !attachmentsChanged) return;
 
     const author = newMessage.author || (cached ? { tag: cached.authorTag, id: cached.authorId } : null);
     const authorTag = author ? author.tag : "Unknown User";
@@ -626,9 +655,12 @@ async function load(ctx) {
       )
       .setTimestamp();
 
+		if (attachmentsChanged) {
+			embed.addFields({ name: "Attachments", value: truncate(attachments.join("\n") || "*None*") });
+		}
+
     await sendLog(ctx, LogConfigModel, newMessage.guild.id, "messages", embed);
 
-    const attachments = Array.from(newMessage.attachments.values()).map((a) => a.url);
     if (cached) {
       cached.content = newMessage.content || "";
       cached.attachments = attachments;
@@ -677,7 +709,7 @@ async function load(ctx) {
       type: AuditLogEvent.RoleCreate,
     }).catch(() => null);
 
-    const logEntry = auditLogs?.entries.first();
+    const logEntry = matchingAuditEntry(auditLogs, role.id);
     const executor = logEntry ? logEntry.executor : null;
 
     const embed = new EmbedBuilder()
@@ -706,7 +738,7 @@ async function load(ctx) {
       type: AuditLogEvent.RoleDelete,
     }).catch(() => null);
 
-    const logEntry = auditLogs?.entries.first();
+    const logEntry = matchingAuditEntry(auditLogs, role.id);
     const executor = logEntry ? logEntry.executor : null;
 
     const embed = new EmbedBuilder()
@@ -731,19 +763,19 @@ async function load(ctx) {
     if (!newRole.guild) return;
 
     const changes = [];
-    if (oldRole.name !== newRole.name) {
+    if (oldRole.name !== undefined && newRole.name !== undefined && oldRole.name !== newRole.name) {
       changes.push(`• **Name**: \`${oldRole.name}\` ➔ \`${newRole.name}\``);
     }
-    if (oldRole.color !== newRole.color) {
+    if (typeof oldRole.color === "number" && typeof newRole.color === "number" && oldRole.color !== newRole.color) {
       changes.push(`• **Color**: \`#${oldRole.color.toString(16).padStart(6, "0")}\` ➔ \`#${newRole.color.toString(16).padStart(6, "0")}\``);
     }
-    if (oldRole.hoist !== newRole.hoist) {
+    if (oldRole.hoist !== undefined && newRole.hoist !== undefined && oldRole.hoist !== newRole.hoist) {
       changes.push(`• **Show members separately**: \`${oldRole.hoist}\` ➔ \`${newRole.hoist}\``);
     }
-    if (oldRole.mentionable !== newRole.mentionable) {
+    if (oldRole.mentionable !== undefined && newRole.mentionable !== undefined && oldRole.mentionable !== newRole.mentionable) {
       changes.push(`• **Mentionable**: \`${oldRole.mentionable}\` ➔ \`${newRole.mentionable}\``);
     }
-    if (oldRole.permissions.bitfield !== newRole.permissions.bitfield) {
+    if (oldRole.permissions && newRole.permissions && oldRole.permissions.bitfield !== newRole.permissions.bitfield) {
       changes.push(`• **Permissions Updated**`);
     }
 
@@ -754,7 +786,7 @@ async function load(ctx) {
       type: AuditLogEvent.RoleUpdate,
     }).catch(() => null);
 
-    const logEntry = auditLogs?.entries.first();
+    const logEntry = matchingAuditEntry(auditLogs, newRole.id);
     const executor = logEntry ? logEntry.executor : null;
 
     const embed = new EmbedBuilder()

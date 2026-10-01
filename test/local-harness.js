@@ -40,6 +40,7 @@ async function main() {
   ctx.client.channels.fetch = async (id) => {
     return {
       id,
+			guildId: "test-guild",
       isTextBased: () => true,
       send: async (payload) => {
         loggedEmbeds.push({ channelId: id, payload });
@@ -255,6 +256,7 @@ async function main() {
     "sendLog without a target user creates no memberEvent docs"
   );
 
+	await require("./regressions")();
   console.log("OK: all server-logs checks passed");
 }
 

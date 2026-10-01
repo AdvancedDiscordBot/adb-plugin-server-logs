@@ -58,6 +58,10 @@ function createFakeModel(fullName, schema) {
 	const matches = (doc, query = {}) =>
 		Object.keys(query).every((k) => {
 			if (k === "_id") return String(doc._id) === String(query[k]);
+			if (query[k] && typeof query[k] === "object") {
+				if ("$lt" in query[k]) return doc[k] < query[k].$lt;
+				if ("$in" in query[k]) return query[k].$in.includes(doc[k]);
+			}
 			return doc[k] === query[k];
 		});
 
@@ -119,6 +123,9 @@ function createFakeModel(fullName, schema) {
 		modelName: fullName,
 		find(q = {}) {
 			return query(() => store.filter((d) => matches(d, q)));
+		},
+		async distinct(field, q = {}) {
+			return [...new Set(store.filter((d) => matches(d, q)).map((d) => d[field]))];
 		},
 		findOne(q = {}) {
 			return query(() => store.find((d) => matches(d, q)) || null);
